@@ -47,12 +47,12 @@ fn main() -> Result<(), Error> {
             .unwrap(),
     );
 
-    let pixels_mutex = {
+    let pixels = {
         let surface_texture = SurfaceTexture::new(WIDTH, HEIGHT, &window);
         Arc::new(Mutex::new(Pixels::new(WIDTH, WIDTH, surface_texture)?))
     };
 
-    run_draw_threads(Arc::clone(&pixels_mutex), Arc::clone(&window));
+    run_draw_threads(Arc::clone(&pixels), Arc::clone(&window));
 
     event_loop.run(move |event, _, control_flow| {
         //println!("{:?}", event);
@@ -65,7 +65,7 @@ fn main() -> Result<(), Error> {
                 _ => (),
             },
             Event::RedrawRequested(_) => {
-                let pixels = pixels_mutex.lock().unwrap();
+                let pixels = pixels.lock().unwrap();
                 if let Err(err) = pixels.render() {
                     println!("pixels.render: {}", err);
                     *control_flow = ControlFlow::Exit;
@@ -79,7 +79,7 @@ fn main() -> Result<(), Error> {
 // This is just a example to simulate a rendering engine that can display results. Generally these systems take a lot
 // of time per section of an image. This can be made to go fast if we want by removing extra threads and just redrawing
 // as we merge tiles into the pixel frame buffer.
-fn run_draw_threads(pixels_mutex: Arc<Mutex<Pixels>>, window: Arc<Window>) {
+fn run_draw_threads(pixels: Arc<Mutex<Pixels>>, window: Arc<Window>) {
     // Channel to queue up more tiles than number of threads there is always work to do.
     let (tile_processor_tx, tile_processor_rx) = crossbeam_channel::bounded(N_THREADS * 8);
 
@@ -89,7 +89,9 @@ fn run_draw_threads(pixels_mutex: Arc<Mutex<Pixels>>, window: Arc<Window>) {
 
     // Spawn the worker threads that will wait to render tiles.
     for _thread in 0..N_THREADS {
-        run_draw_thread(tile_processor_rx.clone(), tile_pixels_tx.clone());
+        let tile_processor_rx = tile_processor_rx.clone();
+        let tile_pixels_tx = tile_pixels_tx.clone();
+        thread::spawn(move || render_tile(tile_processor_rx, tile_pixels_tx));
     }
 
     // Drop extra receiver/sender.
@@ -97,72 +99,80 @@ fn run_draw_threads(pixels_mutex: Arc<Mutex<Pixels>>, window: Arc<Window>) {
     drop(tile_pixels_tx);
 
     // Spawn a thread to periodically redraw the full image.
-    thread::spawn(move || loop {
-        window.request_redraw();
-        thread::sleep(Duration::from_millis(REDRAW_SLEEP_MILLIS));
-    });
+    thread::spawn(move || redraw_window(window));
 
     // Spawn a thread to copy tile to pixel frame buffer.
-    thread::spawn(move || {
-        for (tile_idx, tile_pixels) in tile_pixels_rx.iter() {
-            let (x_min, y_min, _x_max, y_max) = get_tile_bounds(tile_idx);
-
-            let mut pixels = pixels_mutex.lock().unwrap();
-            let frame = pixels.frame_mut();
-
-            for y in y_min..y_max {
-                let dst_start = (y * WIDTH + x_min) as usize * COLOR_CHANNELS;
-                let dst_end = dst_start + TILE_SIZE as usize * COLOR_CHANNELS;
-
-                let src_start = ((y - y_min) * TILE_SIZE) as usize * COLOR_CHANNELS;
-                let src_end = src_start + TILE_SIZE as usize * COLOR_CHANNELS;
-
-                let dst = &mut frame[dst_start..dst_end];
-                let src = &tile_pixels[src_start..src_end];
-                dst.copy_from_slice(src);
-            }
-        }
-    });
+    thread::spawn(move || copy_tile(pixels, tile_pixels_rx));
 
     // Spawn a thread to queue up tiles to render in a random order.
-    thread::spawn(move || {
-        let mut rng = ChaCha20Rng::from_entropy();
-
-        let mut tiles: Vec<_> = (0..N_TILES).collect();
-        tiles.shuffle(&mut rng);
-
-        for tile_idx in tiles {
-            tile_processor_tx.send(tile_idx).unwrap();
-        }
-    });
+    thread::spawn(move || queue_tiles(tile_processor_tx));
 }
 
-fn run_draw_thread(
-    tile_rx: Receiver<u32>,
-    tile_pixels_tx: Sender<(u32, [u8; N_TILES_PIXEL_BYTES])>,
-) {
-    thread::spawn(move || {
-        let mut rng = ChaCha20Rng::from_entropy();
+fn redraw_window(window: Arc<Window>) {
+    loop {
+        window.request_redraw();
+        thread::sleep(Duration::from_millis(REDRAW_SLEEP_MILLIS));
+    }
+}
 
-        let mut tile_pixels = [0_u8; N_TILES_PIXEL_BYTES];
+fn queue_tiles(tile_processor_tx: Sender<Tile>) {
+    let mut rng = ChaCha20Rng::from_entropy();
 
-        for tile_idx in tile_rx.iter() {
-            let r: u8 = rng.gen_range(0..255);
-            let g: u8 = rng.gen_range(0..255);
-            let b: u8 = rng.gen_range(0..255);
+    let mut tiles: Vec<_> = (0..N_TILES).collect();
+    tiles.shuffle(&mut rng);
 
-            for i in (0..tile_pixels.len()).step_by(COLOR_CHANNELS) {
-                tile_pixels[i + 0] = r;
-                tile_pixels[i + 1] = g;
-                tile_pixels[i + 2] = b;
-                tile_pixels[i + 3] = 255;
-            }
+    for tile_idx in tiles {
+        tile_processor_tx.send(Tile(tile_idx)).unwrap();
+    }
+}
 
-            thread::sleep(Duration::from_millis(rng.gen_range(RANDOM_LOAD_MILLIS)));
+fn render_tile(tile_processor_rx: Receiver<Tile>, tile_pixels_tx: Sender<TilePixels>) {
+    let mut rng = ChaCha20Rng::from_entropy();
 
-            tile_pixels_tx.send((tile_idx, tile_pixels)).unwrap();
+    let mut tile_pixels = [0_u8; N_TILES_PIXEL_BYTES];
+
+    for Tile(tile_idx) in tile_processor_rx.iter() {
+        let r: u8 = rng.gen_range(0..255);
+        let g: u8 = rng.gen_range(0..255);
+        let b: u8 = rng.gen_range(0..255);
+
+        for i in (0..tile_pixels.len()).step_by(COLOR_CHANNELS) {
+            tile_pixels[i + 0] = r;
+            tile_pixels[i + 1] = g;
+            tile_pixels[i + 2] = b;
+            tile_pixels[i + 3] = 255;
         }
-    });
+
+        thread::sleep(Duration::from_millis(rng.gen_range(RANDOM_LOAD_MILLIS)));
+
+        tile_pixels_tx
+            .send(TilePixels {
+                tile_idx,
+                tile_pixels,
+            })
+            .unwrap();
+    }
+}
+
+fn copy_tile(pixels: Arc<Mutex<Pixels>>, tile_pixels_rx: Receiver<TilePixels>) {
+    for tile in tile_pixels_rx.iter() {
+        let (x_min, y_min, _x_max, y_max) = get_tile_bounds(tile.tile_idx);
+
+        let mut pixels = pixels.lock().unwrap();
+        let frame = pixels.frame_mut();
+
+        for y in y_min..y_max {
+            let dst_start = (y * WIDTH + x_min) as usize * COLOR_CHANNELS;
+            let dst_end = dst_start + TILE_SIZE as usize * COLOR_CHANNELS;
+
+            let src_start = ((y - y_min) * TILE_SIZE) as usize * COLOR_CHANNELS;
+            let src_end = src_start + TILE_SIZE as usize * COLOR_CHANNELS;
+
+            let dst = &mut frame[dst_start..dst_end];
+            let src = &tile.tile_pixels[src_start..src_end];
+            dst.copy_from_slice(src);
+        }
+    }
 }
 
 fn get_tile_bounds(tile_idx: u32) -> (u32, u32, u32, u32) {
@@ -182,4 +192,11 @@ fn get_tile_bounds(tile_idx: u32) -> (u32, u32, u32, u32) {
     }
 
     (min_x, min_y, max_x, max_y)
+}
+
+struct Tile(u32);
+
+struct TilePixels {
+    tile_idx: u32,
+    tile_pixels: [u8; N_TILES_PIXEL_BYTES],
 }
