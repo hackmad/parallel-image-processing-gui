@@ -89,9 +89,9 @@ fn main() -> Result<(), Error> {
     })
 }
 
-// This is just a example to simulate a rendering engine that can display results. Generally these systems take a lot
-// of time per section of an image. This can be made to go fast if we want by removing extra threads and just redrawing
-// as we merge tiles into the pixel frame buffer.
+/// This is just a example to simulate a rendering engine that can display results. Generally these systems take a lot
+/// of time per section of an image. This can be made to go fast if we want by removing extra threads and just redrawing
+/// as we merge tiles into the pixel frame buffer.
 fn run_threads(
     pixels: Arc<Mutex<Pixels>>,
     window: Arc<Window>,
@@ -103,7 +103,7 @@ fn run_threads(
 
     // Channel to queue up limited number of threads to merge rendered tiles. Because each tile takes up memory we
     // don't want this to be huge but enough so if threads complete faster they aren't waiting to send.
-    let (tile_pixels_tx, tile_pixels_rx) = crossbeam_channel::bounded(CONFIG.threads() * 2);
+    let (tile_copy_tx, tile_copy_rx) = crossbeam_channel::bounded(CONFIG.threads() * 2);
 
     // Channels used to communicate termination.
     let (redraw_tx, redraw_rx) = crossbeam_channel::bounded(1);
@@ -112,8 +112,8 @@ fn run_threads(
     // Spawn the worker threads that will wait to render tiles.
     for _thread in 0..CONFIG.threads() {
         let tile_processor_rx = tile_processor_rx.clone();
-        let tile_pixels_tx = tile_pixels_tx.clone();
-        thread::spawn(move || render_tile(tile_processor_rx, tile_pixels_tx));
+        let tile_copy_tx = tile_copy_tx.clone();
+        thread::spawn(move || render_tile(tile_processor_rx, tile_copy_tx));
     }
 
     // Drop extra receiver/sender.
@@ -123,15 +123,35 @@ fn run_threads(
     thread::spawn(move || redraw_window(window, redraw_rx));
 
     // Spawn a thread to copy tile to pixel frame buffer.
-    thread::spawn(move || copy_tile(pixels, tile_pixels_rx));
+    thread::spawn(move || copy_tile(pixels, tile_copy_rx));
 
     // Spawn a thread to queue up tiles to render in a random order.
     let tile_processor_txc = tile_processor_tx.clone();
     thread::spawn(move || queue_tiles(tile_processor_txc, queue_rx));
 
-    // Spawn a thread that listens for the main thread to signal an exit so it can in turn do the
-    // same for the threads spawned here.
-    thread::spawn(move || loop {
+    // Spawn a thread that handles termination.
+    thread::spawn(move || {
+        wait_for_exit(
+            run_rx,
+            queue_tx,
+            redraw_tx,
+            tile_processor_tx,
+            tile_copy_tx,
+            done_tx,
+        )
+    });
+}
+
+/// Listens for a signal to exit and passes that on to other channels.
+fn wait_for_exit(
+    run_rx: Receiver<ThreadMessage>,
+    queue_tx: Sender<ThreadMessage>,
+    redraw_tx: Sender<ThreadMessage>,
+    tile_processor_tx: Sender<TileMessage>,
+    tile_copy_tx: Sender<CopyTileMessage>,
+    done_tx: Sender<ThreadMessage>,
+) {
+    loop {
         match run_rx.try_recv() {
             Ok(_) | Err(TryRecvError::Disconnected) => {
                 println!("Terminating run_threads()");
@@ -139,7 +159,7 @@ fn run_threads(
                 message_thread(redraw_tx, ThreadMessage::Stop);
                 message_thread(tile_processor_tx, TileMessage::Stop);
                 for _thread in 0..CONFIG.threads() {
-                    message_thread(tile_pixels_tx.clone(), CopyTileMessage::Stop);
+                    message_thread(tile_copy_tx.clone(), CopyTileMessage::Stop);
                 }
                 message_thread(done_tx, ThreadMessage::Stop);
 
@@ -149,9 +169,10 @@ fn run_threads(
                 thread::sleep(Duration::from_millis(1));
             }
         }
-    });
+    }
 }
 
+/// Sends a message to a thread until it is sent or channel is disconnected.
 fn message_thread<T: Clone>(tx: Sender<T>, message: T) {
     loop {
         match tx.try_send(message.clone()) {
@@ -162,6 +183,7 @@ fn message_thread<T: Clone>(tx: Sender<T>, message: T) {
     }
 }
 
+/// Send redraw request periodically. If the redraw channel is disconnected it stops.
 fn redraw_window(window: Arc<Window>, redraw_rx: Receiver<ThreadMessage>) {
     loop {
         match redraw_rx.try_recv() {
@@ -177,6 +199,7 @@ fn redraw_window(window: Arc<Window>, redraw_rx: Receiver<ThreadMessage>) {
     }
 }
 
+/// Queue messages for the tile processor. If the queue channel is disconnected it stops.
 fn queue_tiles(tile_processor_tx: Sender<TileMessage>, queue_rx: Receiver<ThreadMessage>) {
     let mut rng = ChaCha20Rng::from_entropy();
 
@@ -190,13 +213,17 @@ fn queue_tiles(tile_processor_tx: Sender<TileMessage>, queue_rx: Receiver<Thread
                 break;
             }
             Err(TryRecvError::Empty) => {
-                message_thread(tile_processor_tx.clone(), TileMessage::Process(tile_idx));
+                message_thread(
+                    tile_processor_tx.clone(),
+                    TileMessage::Process(Tile(tile_idx)),
+                );
             }
         }
     }
 }
 
-fn render_tile(tile_processor_rx: Receiver<TileMessage>, tile_pixels_tx: Sender<CopyTileMessage>) {
+/// Render tiles until a stop message is received.
+fn render_tile(tile_processor_rx: Receiver<TileMessage>, tile_copy_tx: Sender<CopyTileMessage>) {
     let mut rng = ChaCha20Rng::from_entropy();
 
     let mut tile_pixels = vec![0_u8; CONFIG.tiles_pixel_bytes()];
@@ -220,8 +247,8 @@ fn render_tile(tile_processor_rx: Receiver<TileMessage>, tile_pixels_tx: Sender<
                 ));
 
                 message_thread(
-                    tile_pixels_tx.clone(),
-                    CopyTileMessage::Merge(tile_idx, tile_pixels.clone()),
+                    tile_copy_tx.clone(),
+                    CopyTileMessage::Merge(TilePixels::new(tile_idx, tile_pixels.clone())),
                 );
             }
             TileMessage::Stop => {
@@ -232,10 +259,14 @@ fn render_tile(tile_processor_rx: Receiver<TileMessage>, tile_pixels_tx: Sender<
     }
 }
 
-fn copy_tile(pixels: Arc<Mutex<Pixels>>, tile_pixels_rx: Receiver<CopyTileMessage>) {
-    for message in tile_pixels_rx.iter() {
+/// Copy rendered tiles to pixel frame buffer until a stop message is received.
+fn copy_tile(pixels: Arc<Mutex<Pixels>>, tile_copy_rx: Receiver<CopyTileMessage>) {
+    for message in tile_copy_rx.iter() {
         match message {
-            CopyTileMessage::Merge(tile_idx, tile_pixels) => {
+            CopyTileMessage::Merge(TilePixels {
+                tile: Tile(tile_idx),
+                pixels: tile_pixels,
+            }) => {
                 let (x_min, y_min, _x_max, y_max) = get_tile_bounds(tile_idx);
 
                 let mut pixels = pixels.lock().unwrap();
@@ -262,6 +293,7 @@ fn copy_tile(pixels: Arc<Mutex<Pixels>>, tile_pixels_rx: Receiver<CopyTileMessag
     }
 }
 
+/// Return the mininmum and maximum x/y coordinates for a tile index.
 fn get_tile_bounds(tile_idx: u32) -> (u32, u32, u32, u32) {
     let tile_x = tile_idx % CONFIG.tiles_x();
     let tile_y = tile_idx / CONFIG.tiles_x();
@@ -281,19 +313,43 @@ fn get_tile_bounds(tile_idx: u32) -> (u32, u32, u32, u32) {
     (min_x, min_y, max_x, max_y)
 }
 
+/// Generic messages for a thread.
 #[derive(Copy, Clone)]
 enum ThreadMessage {
     Stop,
 }
 
+/// Messages for tile processor.
 #[derive(Copy, Clone)]
 enum TileMessage {
-    Process(u32),
+    Process(Tile),
     Stop,
 }
 
+/// Messages for thread that copies tile to pixel frame.
 #[derive(Clone)]
 enum CopyTileMessage {
-    Merge(u32, Vec<u8>),
+    Merge(TilePixels),
     Stop,
+}
+
+/// Tile index.
+#[derive(Copy, Clone)]
+struct Tile(u32);
+
+/// Tile pixel data.
+#[derive(Clone)]
+struct TilePixels {
+    /// Tile index.
+    tile: Tile,
+
+    /// Pixel data.
+    pixels: Vec<u8>,
+}
+
+impl TilePixels {
+    /// Create new tile.
+    fn new(tile: Tile, pixels: Vec<u8>) -> Self {
+        TilePixels { tile, pixels }
+    }
 }
