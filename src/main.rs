@@ -14,8 +14,9 @@ use rand_chacha::ChaCha20Rng;
 
 use tao::{
     dpi::PhysicalSize,
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    keyboard::Key,
     window::{Window, WindowBuilder},
 };
 
@@ -27,6 +28,8 @@ static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| AppConfig::parse());
 /// Entry point for the application.
 fn main() -> Result<(), Error> {
     env_logger::init();
+
+    println!("Running with {} threads", CONFIG.threads());
 
     let event_loop = EventLoop::new();
 
@@ -63,7 +66,17 @@ fn main() -> Result<(), Error> {
 
         match event {
             Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
+                WindowEvent::CloseRequested
+                | WindowEvent::Destroyed
+                | WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            logical_key: Key::Escape,
+                            state: ElementState::Released,
+                            ..
+                        },
+                    ..
+                } => {
                     println!("Exit application. Waiting for threads to stop...");
                     message_thread(run_tx.clone(), ThreadMessage::Stop);
                     done_rx.recv().unwrap();
