@@ -1,5 +1,8 @@
 use clap::Parser;
-use std::thread;
+use std::{
+    num::{NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize},
+    thread,
+};
 
 pub const COLOR_CHANNELS: usize = 4;
 
@@ -11,77 +14,83 @@ pub struct AppConfig {
     #[arg(
         long = "width",
         value_name = "WIDTH",
-        default_value_t = 512,
-        help = "image width in pixels"
+        default_value_t = NonZeroU32::new(512).unwrap(),
+        help = "image width in pixels",
     )]
-    pub width: u32,
+    pub width: NonZeroU32,
 
     /// Image width.
     #[arg(
         long = "height",
         value_name = "HEIGHT",
-        default_value_t = 512,
-        help = "image height in pixels"
+        default_value_t = NonZeroU32::new(512).unwrap(),
+        help = "image height in pixels",
     )]
-    pub height: u32,
+    pub height: NonZeroU32,
 
     /// Number of threads.
     #[arg(
         long = "threads",
         value_name = "THREADS",
-        default_value_t = get_max_threads(),
+        default_value_t = NonZeroUsize::new(get_max_threads()).unwrap(),
         help = "number of threads to use (default = max logical cores)",
     )]
-    num_threads: usize,
+    num_threads: NonZeroUsize,
 
     /// Tile size.
     #[arg(
         long = "tile-size",
         value_name = "TILE_SIZE",
-        default_value_t = 32,
-        help = "tile size in pixels (default = 32)"
+        default_value_t = NonZeroU8::new(32).unwrap(),
+        help = "tile size in pixels (default = 32)",
     )]
-    pub tile_size: u8,
+    pub tile_size: NonZeroU8,
 
     /// How often to request redraw.
     #[arg(
         long = "redraw-millis",
         short = 'r',
         value_name = "REDRAW_MILLIS",
-        default_value_t = 1,
-        help = "how often to request redraw in milliseconds (default = 1)"
+        default_value_t = NonZeroU64::new(1).unwrap(),
+        help = "how often to request redraw in milliseconds (default = 1)",
     )]
-    pub redraw_millis: u64,
+    pub redraw_millis: NonZeroU64,
 
     /// How often to request redraw.
     #[arg(
-        long = "random-load-millis",
+        long = "max-load-millis",
         short = 'l',
-        value_name = "RANDOM_LOAD_MILLIS",
-        default_value_t = 100,
-        help = "max time in milliseconds to use to simulate tile rendering load (default = 100)"
+        value_name = "MAX_LOAD_MILLIS",
+        default_value_t = NonZeroU64::new(100).unwrap(),
+        help = "max time in milliseconds to use to simulate tile rendering load (default = 100)",
     )]
-    pub random_load_millis: u64,
+    pub max_load_millis: NonZeroU64,
 }
 
 impl AppConfig {
     /// Returns the number of threads to use.
     pub fn threads(&self) -> usize {
-        let max_threads = get_max_threads();
-        if self.num_threads == 0 {
+        let n_threads = self.num_threads.get();
+        if n_threads == 0 {
             panic!("Invalid num threads");
-        } else if self.num_threads > max_threads {
-            panic!("Num threads > max logical CPUs {}", max_threads);
         }
-        self.num_threads
+
+        let max_threads = get_max_threads();
+        if n_threads > max_threads {
+            panic!("Num threads {n_threads} > max logical CPUs {max_threads}");
+        }
+
+        n_threads
     }
 
     pub fn tiles_x(&self) -> u32 {
-        ((self.width as f32 + (self.tile_size - 1) as f32) / self.tile_size as f32) as u32
+        ((self.width.get() as f32 + (self.tile_size.get() - 1) as f32)
+            / self.tile_size.get() as f32) as u32
     }
 
     pub fn tiles_y(&self) -> u32 {
-        ((self.height as f32 + (self.tile_size - 1) as f32) / self.tile_size as f32) as u32
+        ((self.height.get() as f32 + (self.tile_size.get() - 1) as f32)
+            / self.tile_size.get() as f32) as u32
     }
 
     pub fn tiles(&self) -> u32 {
@@ -89,7 +98,7 @@ impl AppConfig {
     }
 
     pub fn tiles_pixel_bytes(&self) -> usize {
-        self.tile_size as usize * self.tile_size as usize * COLOR_CHANNELS
+        self.tile_size.get() as usize * self.tile_size.get() as usize * COLOR_CHANNELS
     }
 }
 
