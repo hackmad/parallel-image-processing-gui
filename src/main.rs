@@ -164,24 +164,18 @@ fn wait_for_exit(
     tile_copy_tx: Sender<CopyTileMessage>,
     done_tx: Sender<ThreadMessage>,
 ) {
-    loop {
-        match run_rx.try_recv() {
-            Ok(_) | Err(TryRecvError::Disconnected) => {
-                println!("Terminating run_threads()");
-                message_thread(queue_tx, ThreadMessage::Stop);
-                message_thread(redraw_tx, ThreadMessage::Stop);
-                message_thread(tile_processor_tx, TileMessage::Stop);
-                for _thread in 0..CONFIG.threads() {
-                    message_thread(tile_copy_tx.clone(), CopyTileMessage::Stop);
-                }
-                message_thread(done_tx, ThreadMessage::Stop);
-
-                break;
-            }
-            Err(TryRecvError::Empty) => {
-                thread::sleep(Duration::from_millis(1));
-            }
+    // Will only ever receive the stop message. So once it is received, start the process to stop.
+    for _ in run_rx.iter() {
+        println!("Terminating run_threads()");
+        message_thread(queue_tx, ThreadMessage::Stop);
+        message_thread(redraw_tx, ThreadMessage::Stop);
+        message_thread(tile_processor_tx, TileMessage::Stop);
+        for _thread in 0..CONFIG.threads() {
+            message_thread(tile_copy_tx.clone(), CopyTileMessage::Stop);
         }
+        message_thread(done_tx, ThreadMessage::Stop);
+
+        break;
     }
 }
 
