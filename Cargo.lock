@@ -1315,7 +1315,6 @@ name = "parallel-image-processing-gui"
 version = "0.1.0"
 dependencies = [
  "clap",
- "crossbeam-channel",
  "env_logger",
  "pixels",
  "rand",

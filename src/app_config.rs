@@ -48,16 +48,6 @@ pub struct AppConfig {
 
     /// How often to request redraw.
     #[arg(
-        long = "redraw-millis",
-        short = 'r',
-        value_name = "REDRAW_MILLIS",
-        default_value_t = NonZeroU64::new(1).unwrap(),
-        help = "how often to request redraw in milliseconds (default = 1)",
-    )]
-    pub redraw_millis: NonZeroU64,
-
-    /// How often to request redraw.
-    #[arg(
         long = "max-load-millis",
         short = 'l',
         value_name = "MAX_LOAD_MILLIS",
