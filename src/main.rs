@@ -13,7 +13,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 
 use tao::{
-    dpi::PhysicalSize,
+    dpi::LogicalSize,
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     keyboard::Key,
@@ -42,15 +42,18 @@ fn main() -> Result<(), Error> {
     let window = Arc::new(
         WindowBuilder::new()
             .with_title("A fantastic window!")
-            .with_inner_size(PhysicalSize::new(CONFIG.width.get(), CONFIG.height.get()))
+            .with_inner_size(LogicalSize::new(CONFIG.width.get(), CONFIG.height.get()))
             .with_resizable(false)
             .build(&event_loop)
             .unwrap(),
     );
+    let inner_size = window.inner_size();
 
-    // Setup a pixel frame buffer to display image as it is rendered.
+    // Create a surface texture that uses the logical inner size to render to the entire window's inner dimensions.
+    // Then create pixel frame buffer that matches rendered image dimensions.
     let pixels = {
-        let surface_texture = SurfaceTexture::new(CONFIG.width.get(), CONFIG.height.get(), &window);
+        let surface_texture = SurfaceTexture::new(inner_size.width, inner_size.height, &window);
+
         Arc::new(Mutex::new(Pixels::new(
             CONFIG.width.get(),
             CONFIG.height.get(),
@@ -179,17 +182,21 @@ fn render_tile(tile_idx: u32, tile_pixels: &mut [u8]) {
 
 /// Copy rendered tile to pixel frame buffer.
 fn copy_tile(tile_idx: u32, tile_pixels: &[u8], pixels: Arc<Mutex<Pixels>>) {
-    let (x_min, y_min, _x_max, y_max) = get_tile_bounds(tile_idx);
+    let (x_min, y_min, x_max, y_max) = get_tile_bounds(tile_idx);
 
     let mut pixels = pixels.lock().unwrap();
     let frame = pixels.frame_mut();
 
-    for y in y_min..y_max {
-        let dst_start = (y * CONFIG.width.get() + x_min) as usize * COLOR_CHANNELS;
-        let dst_end = dst_start + CONFIG.tile_size.get() as usize * COLOR_CHANNELS;
+    let w = CONFIG.width.get();
+    let ts = CONFIG.tile_size.get() as usize;
+    let tw = (x_max - x_min + 1) as usize;
 
-        let src_start = (y - y_min) as usize * CONFIG.tile_size.get() as usize * COLOR_CHANNELS;
-        let src_end = src_start + CONFIG.tile_size.get() as usize * COLOR_CHANNELS;
+    for y in y_min..=y_max {
+        let dst_start = (y * w + x_min) as usize * COLOR_CHANNELS;
+        let dst_end = dst_start + tw * COLOR_CHANNELS;
+
+        let src_start = (y - y_min) as usize * ts * COLOR_CHANNELS;
+        let src_end = src_start + tw * COLOR_CHANNELS;
 
         let dst = &mut frame[dst_start..dst_end];
         let src = &tile_pixels[src_start..src_end];
@@ -199,20 +206,20 @@ fn copy_tile(tile_idx: u32, tile_pixels: &[u8], pixels: Arc<Mutex<Pixels>>) {
 
 /// Return the mininmum and maximum x/y coordinates for a tile index.
 fn get_tile_bounds(tile_idx: u32) -> (u32, u32, u32, u32) {
-    let tile_x = tile_idx % CONFIG.tiles_x();
-    let tile_y = tile_idx / CONFIG.tiles_x();
+    let tile_x = (tile_idx % CONFIG.tiles_x()) as u32;
+    let tile_y = (tile_idx / CONFIG.tiles_x()) as u32;
 
-    let min_y = tile_y * CONFIG.tile_size.get() as u32;
-    let mut max_y = min_y + CONFIG.tile_size.get() as u32;
-    if max_y > CONFIG.height.get() - 1 {
-        max_y = CONFIG.height.get() - 1;
+    let y_min = tile_y * CONFIG.tile_size.get() as u32;
+    let mut y_max = y_min as u32 + CONFIG.tile_size.get() as u32 - 1;
+    if y_max > CONFIG.height.get() - 1 {
+        y_max = CONFIG.height.get() - 1;
     }
 
-    let min_x = tile_x * CONFIG.tile_size.get() as u32;
-    let mut max_x = min_x + CONFIG.tile_size.get() as u32;
-    if max_x > CONFIG.width.get() - 1 {
-        max_x = CONFIG.width.get() - 1;
+    let x_min = tile_x * CONFIG.tile_size.get() as u32;
+    let mut x_max = x_min + CONFIG.tile_size.get() as u32 - 1;
+    if x_max > CONFIG.width.get() - 1 {
+        x_max = CONFIG.width.get() - 1;
     }
 
-    (min_x, min_y, max_x, max_y)
+    (x_min, y_min, x_max, y_max)
 }
