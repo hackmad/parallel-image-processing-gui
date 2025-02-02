@@ -1,4 +1,7 @@
+//! Application configuration
+
 use clap::Parser;
+
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize},
     thread,
