@@ -9,4 +9,4 @@ env_logger = "0.11"
 pixels = "0.15"
 rand = "0.8"
 rand_chacha = "0.3"
-winit = { version = "0.30", features = ["rwh_05"] }
+winit = { version = "0.30" }

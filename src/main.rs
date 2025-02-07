@@ -41,4 +41,3 @@ fn main() -> Result<(), EventLoopError> {
     // Run the event loop.
     run_event_loop()
 }
-
